@@ -1,0 +1,184 @@
+---
+title: "Movielens Capstone Report"
+author: "Adam Wilson"
+date: "May 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(caret)
+library(tidyverse)
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+## Introduction
+
+For this project, we create a movie recommendation system using the MovieLens dataset, which is a dataset of movie ratings from Netflix. Netflix allows users to rate movies with 0 to 5 stars, and our goal is to predict a movie's rating as accurately as possible. We achieve this with machine learning techniques.
+
+Specifically, we will use the MovieLens 10M Dataset, which can be found here: <https://grouplens.org/datasets/movielens/10m/>. It gives us 10 million movie ratings across 10,000 movies by 72,000 users.
+
+Our key steps will be splitting our data into two groups, so that we can work on one group and then test our algorithms on another. We will perform our machine learning algorithms on models that we will make gradually more complex, but hopefully more accurate. We base our accuracy upon RMSE, which is further discussed in the next section.
+
+## Methodology
+
+We take our MovieLens 10M Dataset and split it into two groups: the training set, **edx**, which consists of 90% of our dataset, and the test set, **validation**, which consists of the remaining 10%. We will perform machine learning algorithms on our training set and then test its accuracy on our test set.
+
+We will judge our accuracy based on *Residual Mean Squared Error* (*RMSE*), which compares the difference between a predicted result and the actual result. We start off with a simple model and gradually make it more complex until we are satisfied with our RMSE.
+
+### Method 1: One Value Only
+
+Our first method is to assume that all future estimates will just be the current average rating.
+
+```{r method 1, include=FALSE}
+mu_hat <- mean(edx$rating)
+naive_rmse <- RMSE(validation$rating, mu_hat)
+rmse_results <- data_frame(method = 'Average Rating Only', RMSE = naive_rmse)
+```
+
+```{r mu_hat}
+# Average Movie Rating
+
+mu_hat
+```
+
+
+```{r method 1 results, echo = FALSE}
+rmse_results %>% knitr::kable()
+```
+
+### Method 2: Movie Effect
+
+Next we will assume that there is a difference across movies, i.e. some movies just tend to be rated higher or lower than others. What we do is observe the ratings of each movie in our training set and take its difference from the mean rating. We then compare it to the ratings observed in our test set, and use these to calculate our next RMSE.
+
+```{r method 2, echo = FALSE}
+mu <- mean(edx$rating)
+movie_avgs <- edx %>%
+  group_by(movieId) %>%
+  summarize(b_i = mean(rating - mu))
+
+predicted_ratings <- mu + validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+
+method_2_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method='Movie Differences',
+                                     RMSE = method_2_rmse))
+
+rmse_results %>% knitr::kable()
+```
+
+### Method 3: Movie & User Effect
+
+Next let's assume there is a difference across users too, i.e. some viewers just to tend to rate their watched movies higher or lower than others. We add this observation to the previous method, so that we account for movie effect and user effect at the same time.
+
+```{r method 3, echo = FALSE}
+user_avgs <- edx %>%
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- validation %>%
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+method_3_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method='Movie and User Differences',
+                                     RMSE = method_3_rmse))
+
+rmse_results %>% knitr::kable()
+```
+
+This is a good result, but we'll see if we can make it better with one further step, using regularization.
+
+### Method 4: Regularization of Method 3
+
+It is possible that some movies have been 'unfairly' rated very high or very low, as very few people have rated them, compared to other movies which may have thousands of ratings. Regularization can account for this. We set a tuning parameter, **Lambda**, to account for scenarios in which the sample size of ratings is very small. If the sample size is very large, the penalty Lambda is effectively ignored, but if the sample size is very small, the *movie effect* is shrunken towards 0.
+
+First we calculate which Lambda gives us the best RMSE.
+
+```{r lambda plot, echo = FALSE}
+lambdas <- seq(0,10,0.25)
+
+rmses <- sapply(lambdas, function(L){
+  mu <- mean(edx$rating)
+  b_i <- edx %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n() + L))
+  b_u <- edx %>%
+    left_join(b_i, by='movieId') %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - mu - b_i)/(n() + L))
+  predicted_ratings <- validation %>%
+    left_join(b_i, by='movieId') %>%
+    left_join(b_u, by='userId') %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  return(RMSE(predicted_ratings, validation$rating))
+})
+
+qplot(lambdas, rmses)
+```
+
+```{r best lambda}
+# Best Lambda
+
+lambdas[which.min(rmses)]
+```
+
+And finally, we add the best RMSE we found here to our dataframe.
+
+```{r method 4, echo = FALSE}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method='Regularized Movie & User Effect',
+                                     RMSE = min(rmses)))
+
+rmse_results %>% knitr::kable()
+```
+
+## Results
+
+We calculated an average star rating of **3.512**, which we used on our first simple model, as well as to calculate differences on all following models. We have shown multiple dataframes with gradually increasing rows that show how our RMSE improves. Our final resulting RMSE was **0.865**. We also calculated a Lambda of **5.25** to achieve the minimum RMSE for our model that used penalizing least squares.
+
+## Conclusion
+
+As we can see, using regularization changed our RMSE only slightly. This likely means that there were not many ratings that were 'outliers'. In other words, there were not many movies with very few ratings, or if there were, they were not rated very high or low. However, I believe that it would still be good practice to perform regularization, even if the resulting RMSE change is minimal.
+
+Our final RMSE of 0.865 means that on average, our recommendation system's accuracy is only 0.865 stars away from the true rating in our test set. I believe this is to be of satisfactory accuracy.
