@@ -1,0 +1,372 @@
+---
+title: "What makes a country happy?"
+author: "Adam Wilson"
+date: "May 7, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction & Background
+
+This is no easy question to answer, but we will do our best using the information provided from the Wikipedia article titled "World Happiness Report". You can find the url in the 'References' section at the very end of this report.
+
+This project and report is for the **Data Science: Capstone** (**PH125.9x**) course, by **HarvardX**, on <https://www.edx.org/>.
+
+We will be focusing on the 2018 report, which shows the international rankings of countries listed in descending order of their *happiness*. It averages the scores over 2015-2017 for 156 countries.
+
+The scores are obtained as follows: respondents are asked to think of a ladder, with the best possible life being a 10, and the worst possible life being a 0. Respondents are then asked to rate their own life on this 0-10 ladder.
+
+These scores are correlated with various life factors that vary among countries. These are:
+
+- **GDP Per Capita**: This is calculated by using the natural log of a country's citizens' purchasing power, adjusted to 2011 international dollars. The natural log is used rather than direct GDP per capita as this form fits the data better.
+
+- **Social Support**: Respondents are asked "If you were in trouble, do you have relatives or friends you can count on to help you whenever you need them?". The response is binary, either "yes" (1) or "no" (0). The national average of these binary responses is calculated. (Note that despite supposedly being an average of binaries, there are many values on the table between 1 and 2. I was unable to decipher the reasoning behind this. However, this should not disrupt our analysis.)
+
+- **Healthy Life Expectancy**: This is the ratio of people that life in 'good health' for a given age. A time series of healthy life expectancy is constructed based on data from the World Heath Organization (WHO) and World Development Indicators (WDI). We generate the ratios of healthy life expectancy to raw life expectancy.
+
+- **Freedom to Make Life Choices**: This is the national average of binary responses to the question "Are you satisfied with your freedom to choose what to do with your life?".
+
+- **Generosity**:  This is the residual of regressing the national average of responses to the question "Have you donated money to charity in the post month?", on GDP per capita.
+
+- **Perceptions of Corrution**: This is the average of binary answers to two questions: "Is corruption widespread throughout the government?" and "Is corruption widespread within business?".
+
+Our goal is to compare the scores to these other six variables, determine exactly how correlated they are, and find out if these variables are sufficient for determining happiness.
+
+## Methodology
+
+This analysis is done using the **R** programming language.
+
+First we load the necessary packages. We retrieve the html code of our Wikipedia article of interest, and assign the required table, the *2018 report*, into a dataframe. Then we edit this dataframe to make it more analysis-friendly.
+
+Next we move on to observing our data. We create density plots for *score* and the 6 independent variables. We then plot *score* against these variables, one at a time. We then have a look at the correlation coefficients between *score* and our other variables, and create a graph to show these visually.
+
+Next we will perform machine learning algorithms on our data. We create training and testing sets of our data, representing 80% and 20% of our data respectively. We perform our algorithms on the training set and then see how accurate it is on predicting scores in the testing set. We will judge the effectiveness of our algorithms based on their resulting residual mean squared error (RMSE) and accuracy. We judge a score to be sufficiently accurate if it is within 0.5 points of the actual score. First we see how accurate it will be to simply guess the average score from our training set and apply it to our testing set. We will then use linear regression, followed by k-nearest neighbors (KNN), followed by the random forests algorithm.
+
+## Analysis & Results
+
+```{r libraries, include=FALSE}
+library(tidyverse)
+library(rvest)
+library(ggplot2)
+library(gridExtra)
+library(caret)
+library(randomForest)
+```
+```{r wiki, include=FALSE}
+url <- paste0("https://en.wikipedia.org/wiki/World_Happiness_Report")
+h <- read_html(url)
+```
+```{r table, include=FALSE}
+tab <- h %>% html_nodes("table")
+tab <- tab[[5]] %>% html_table
+```
+
+First, let's look at the top ten entries of our table.
+
+```{r tab}
+head(tab,10)
+```
+
+We make our dataframe more friendly for analysis, and observe its structure.
+
+```{r ranks, include=FALSE}
+ranks <- tab
+names(ranks) <- c('rank','country','score','gdp_per_capita','social_support','healthy_life_expectancy',
+                  'life_choices_freedom','generosity','corruption_perceptions')
+```
+```{r structure}
+str(ranks)
+```
+
+We see that all of our variables are numerical except for *corruption_perceptions*, which has been defined as a list of characters. This is because there is a value labelled 'N/A' within this variable's column. We remove this country from our analysis.
+
+```{r numeric, include=FALSE}
+ranks$corruption_perceptions <- as.numeric(ranks$corruption_perceptions)
+ranks <- ranks[complete.cases(ranks),]
+```
+
+Now let's look at some density plots, first of *score*, and then of our independent variables.
+
+```{r score density, echo=FALSE}
+ranks %>%
+  ggplot(aes(score)) +
+  geom_density(fill = 'gold') +
+  xlab('Score') + ylab('Density') + ggtitle('Density of Scores')
+```
+
+```{r densities, echo=FALSE}
+den1 <- ranks %>%
+  ggplot(aes(gdp_per_capita)) + geom_density(fill='green') +
+  xlab('GDP Per Capita') + ylab('Density')
+den2 <- ranks %>%
+  ggplot(aes(social_support)) + geom_density(fill='deeppink') +
+  xlab('Social Support') + ylab('Density')
+den3 <- ranks %>%
+  ggplot(aes(healthy_life_expectancy)) + geom_density(fill='blue') +
+  xlab('Healthy Life Expectancy') + ylab('Density')
+den4 <- ranks %>%
+  ggplot(aes(life_choices_freedom)) + geom_density(fill='orange') +
+  xlab('Freedom of Life Choices') + ylab('Density')
+den5 <- ranks %>%
+  ggplot(aes(generosity)) + geom_density(fill='purple') +
+  xlab('Generosity') + ylab('Density')
+den6 <- ranks %>%
+  ggplot(aes(corruption_perceptions)) + geom_density(fill='red') +
+  xlab('Perceptions of Corruption') + ylab('Density')
+grid.arrange(den1,den2,den3,den4,den5,den6, ncol=3)
+```
+
+It looks like *score* approximately follows a Normal distribution, but the same cannot be said for our other variables.
+
+Now let's plot *score* against the other variables.
+
+```{r plots, echo=FALSE}
+plot1 <- ranks %>%
+  ggplot(aes(score, gdp_per_capita)) + geom_point(color='green') +
+  geom_abline(slope = (sum(ranks$gdp_per_capita)/sum(ranks$score)), lwd=1.5, color='gold') +
+  xlab('Score') + ylab('GDP Per Capita')
+plot2 <- ranks %>%
+  ggplot(aes(score,social_support)) + geom_point(color='deeppink') +
+  geom_abline(slope = (sum(ranks$social_support)/sum(ranks$score)), lwd=1.5, color='gold') +
+  xlab('Score') + ylab('Social Support')
+plot3 <- ranks %>%
+  ggplot(aes(score, healthy_life_expectancy)) + geom_point(color='blue') +
+  geom_abline(slope = (sum(ranks$healthy_life_expectancy)/sum(ranks$score)), lwd=1.5, color='gold') +
+  xlab('Score') + ylab('Healthy Life Expectancy')
+plot4 <- ranks %>%
+  ggplot(aes(score, life_choices_freedom)) + geom_point(color='orange') +
+  geom_abline(slope = (sum(ranks$life_choices_freedom)/sum(ranks$score)), lwd=1.5, color='gold') +
+  xlab('Score') + ylab('Freedom of Life Choices')
+plot5 <- ranks %>%
+  ggplot(aes(score, generosity)) + geom_point(color='purple') +
+  geom_abline(slope = (sum(ranks$generosity)/sum(ranks$score)), lwd=1.5, color='gold') +
+  xlab('Score') + ylab('Generosity')
+plot6 <- ranks %>%
+  ggplot(aes(score,corruption_perceptions)) + geom_point(color='red') +
+  geom_abline(slope = (sum(ranks$corruption_perceptions)/sum(ranks$score)), lwd=1.5, color='gold') +
+  xlab('Score') + ylab('Perceptions of Corruption')
+grid.arrange(plot1,plot2,plot3,plot4,plot5,plot6, ncol=3)
+```
+
+It looks like *score* has a high correlation with *GDP per capita*, *social support*, *healthy life expectancy*, and *freedom of life choices*, but has a lower correlaton with *generosity* and *perceptions of corruption*. We can confirm this with another graph that shows the correlation coefficients.
+
+```{r coeffs, echo=FALSE}
+ranks %>%
+  ggplot(aes(scale(score), scale(gdp_per_capita))) +
+  geom_point(alpha=0) +
+  geom_abline(intercept=0, slope = cor(ranks$score, ranks$gdp_per_capita), col='green', lwd=1.5) +
+  geom_abline(intercept=0, slope = cor(ranks$score, ranks$social_support), col='deeppink', lwd=2) +
+  geom_abline(intercept=0, slope = cor(ranks$score, ranks$healthy_life_expectancy), col='blue', lwd=1.5) +
+  geom_abline(intercept=0, slope = cor(ranks$score, ranks$life_choices_freedom), col='orange', lwd=1.5) +
+  geom_abline(intercept=0, slope = cor(ranks$score, ranks$generosity), col='purple', lwd=1.5) +
+  geom_abline(intercept=0, slope = cor(ranks$score, ranks$corruption_perceptions), col='red', lwd=1.5) +
+  ggtitle('Correlation Coefficients of Score against the 6 independent variables') +
+  xlab('Score (Standardized)') + ylab('Independent Variables (Standardized)') +
+  geom_text(x=-1.5, y=1, label='GDP Per Capita: 0.81', color='green') +
+  geom_text(x=-1.5, y=0.5, label='Social Support: 0.77', color='deeppink') +
+  geom_text(x=-1.5, y=0.75, label='Healthy Life Expectancy: 0.78', color='blue') +
+  geom_text(x=-1.5, y=0.25, label='Freedom of Life Choices: 0.56', color='orange') +
+  geom_text(x=1, y=-0.75, label='Generosity: 0.13', color='purple') +
+  geom_text(x=1,y=-0.5, label='Perceptions of Corruption: 0.41', color='red')
+```
+
+Now let's continue on to our machine learning algorithms. As mentioned before, we split our data into two parts: training set, consisting of 80% of the data, and testing set, consisting of the other 20%.
+
+```{r train_test, include=FALSE}
+set.seed(2019)
+
+y <- ranks$score
+test_index <- createDataPartition(y, times=1, p=0.2, list = FALSE)
+train_set <- ranks %>% slice(-test_index)
+test_set <- ranks %>% slice(test_index)
+```
+
+### Method 1: Guessing the average
+
+Before we start our algorithms, let's see how far we get with just guessing that a score from the testing set will be the **average score** of the training set.
+
+```{r mean}
+m <- mean(train_set$score)
+m
+```
+
+Our mean score is **5.38**. Now let's see how our *residual mean squared error* (*RMSE*) and *accuracy* fare. As mentioned before, we will consider a predicted score as accurate enough if it is within 0.5 points of the true score.
+
+```{r avg, include=FALSE}
+avg_rmse <- sqrt(mean((m - test_set$score)^2))
+avg_acc <- mean(abs(test_set$score - m) <= 0.5)
+```
+
+```{r avg_results}
+avg_rmse
+mean(avg_acc)
+```
+
+We get an RMSE of **1.12** and accuracy of **0.31**. This means that a given predicted score is an average of 1.12 points away from its true score, and that the predicted score correctly guesses the true score 31% of the time.
+
+### Method 2: Linear Regression
+
+We now move on to **linear regression**.
+
+```{r fit, include=FALSE}
+set.seed(2019)
+test_index <- createDataPartition(y, times=1, p=0.2, list = FALSE)
+train_set <- ranks %>% slice(-test_index)
+test_set <- ranks %>% slice(test_index)
+
+fit <- lm(score ~ gdp_per_capita + social_support + healthy_life_expectancy + life_choices_freedom + generosity + corruption_perceptions,
+          data = train_set)
+```
+```{r fit_coef}
+fit$coef
+```
+
+This means that, according to our linear model, *score* can be predicted as follows (to two decimal places):
+
+`Score = 1.68 + 0.74G + 1.24S + 1.29H + 1.34F + 0.41G + 0.65C`,
+
+where `G = GDP per capita`, `S = social support`, `H = healthy life expectancy`, `F = freedom of life choices`, `G = generosity`, and `C = perceptions of corruption`.
+
+Now let's see how this model performs on our testing set.
+
+```{r lm, include=FALSE}
+y_hat <- fit$coef[1] +
+  fit$coef[2]*test_set$gdp_per_capita +
+  fit$coef[3]*test_set$social_support +
+  fit$coef[4]*test_set$healthy_life_expectancy +
+  fit$coef[5]*test_set$life_choices_freedom +
+  fit$coef[6]*test_set$generosity +
+  fit$coef[7]*test_set$corruption_perceptions
+
+lm_rmse <- sqrt(mean((y_hat - test_set$score)^2))
+lm_acc <- mean(abs(y_hat - test_set$score) <= 0.5)
+```
+
+```{r lm_results}
+lm_rmse
+mean(lm_acc)
+```
+
+We have improved our results; we have an RMSE of **0.54**, and an accuracy of **66%**.
+
+### Method 3: KNN
+
+Now we move on to the **k-nearest neighbors** (**KNN**) algorithm. This algorithm works by defining a data point in the feature space (of our independent variables) that we wish to define. The **k** is how many of the closest points (in our case, these are the scores) from that data point we wish to consider. The average of these points is what our given data point becomes. We will perform cross-validation to find the *k* that gives us the minimum RMSE.
+
+```{r train_knn, include=FALSE}
+set.seed(2019)
+test_index <- createDataPartition(y, times=1, p=0.2, list = FALSE)
+train_set <- ranks %>% slice(-test_index)
+test_set <- ranks %>% slice(test_index)
+
+train_knn <- train(score ~ gdp_per_capita + social_support + healthy_life_expectancy + life_choices_freedom + generosity + corruption_perceptions,
+                   method = 'knn',
+                   data = train_set,
+                   tuneGrid = data.frame(k = seq(2,100,2)))
+```
+
+```{r bestTune}
+train_knn$bestTune
+```
+
+This means that our KNN algorithm works best when a given data point considers its **8** closest neighbors (which is the 4th observed number in our algorithm, as we try out every even number from 2 to 100). So what RMSE and accuracy does this give us?
+
+```{r knn, include = FALSE}
+knn_predict <- predict(train_knn, test_set)
+
+knn_rmse <- sqrt(mean((knn_predict - test_set$score)^2))
+knn_acc <- mean(abs(knn_predict - test_set$score) <= 0.5)
+```
+
+```{r knn_results}
+knn_rmse
+mean(knn_acc)
+```
+
+Our results are very similar, with an RMSE of **0.54** and an accuracy of **66%**.
+
+### Method 4: Random Forests
+
+We move on the final algorithm we consider for this report: the **random forests** algorithm. This algorithm uses **decision trees** (which is, in this context, an algorithm where you move down different paths of a 'tree' based on the value of variables, to arrive at the optimal *score*), but improves performance by average multiple decision trees. We get the following RMSE and accuracy from this method:
+
+```{r rf, include=FALSE}
+set.seed(2019)
+test_index <- createDataPartition(y, times=1, p=0.2, list = FALSE)
+train_set <- ranks %>% slice(-test_index)
+test_set <- ranks %>% slice(test_index)
+
+train_rf <- randomForest(score ~  gdp_per_capita + social_support + healthy_life_expectancy +
+                           life_choices_freedom + generosity + corruption_perceptions,
+                         data = train_set)
+
+rf_predict <- predict(train_rf, test_set)
+
+rf_rmse <- sqrt(mean((rf_predict - test_set$score)^2))
+rf_acc <- mean(abs(rf_predict - test_set$score) <= 0.5)
+```
+
+```{r rf_results}
+rf_rmse
+mean(rf_acc)
+```
+
+This gives us our best result, with an RMSE of **0.50** and accuracy of **72%**.
+
+Let's make our findings more readable by organizing them into simple dataframes.
+
+```{r final_dataframes, include=FALSE}
+ml_scores <- round(data.frame(test_set$score, m - test_set$score, y_hat - test_set$score,
+                              knn_predict - test_set$score, rf_predict - test_set$score),2)
+names(ml_scores) <- c('True Score','Average Score Difference','Linear Regression Difference',
+                      'KNN Difference','Random Forests Difference')
+
+Method = c('Just the Average','Linear Regression','KNN','Random Forest')
+RMSE <- round(c(avg_rmse, lm_rmse, knn_rmse, rf_rmse),2)
+Accuracy <- round(c(mean(avg_acc), mean(lm_acc), mean(knn_acc), mean(rf_acc)),2)
+ml_df <- data.frame(Method, RMSE, Accuracy)
+```
+
+Here we compare the true scores from our test set against our predictions:
+
+```{r ml_scores}
+ml_scores
+```
+
+Here we summarize our RMSEs and accuracy of each algorithm:
+
+```{r ml_df}
+ml_df
+```
+
+## Discussion
+
+As mentioned in the analysis, it appears that *score* approximately follows a Normal Distribution. We can confirm this graphically by augmenting our plot, comparing the density curve of *score* to the Normal Distribution curve, with a mean and standard deviation equal to that of the *score* variable.
+
+```{r scores_norm, echo=FALSE}
+ranks %>%
+  ggplot(aes(score)) +
+  geom_density(fill = 'gold') +
+  xlab('Score') + ylab('Density') + ggtitle('Density of Scores vs Normal Distribution') +
+  stat_function(fun = dnorm, n = 155, args = list(mean=mean(ranks$score), sd = sd(ranks$score)), lwd=2)
+```
+
+The same cannot be said for our six independent variables. It appears that *GDP per capita*, *social support*, *healthy life expectancy*, and *freedom of life choices* are skewed to the right, whilst *generosity* and *perception of corruption* are skewed to the left. This is mostly good news, since it shows that most countries' citizens aren't impoverished, have sufficient support from friends and family, will live a large portion of their life relatively healthily, feel that they have have the freedom to pursue their life choices, and do not feel that their government and local businesses are corrupt. It does seem, however, that most respondents aren't particularly charitable.
+
+Observing our correlation coefficients, it appears that *score* correlates highly with *GDP per capita*, *healthy life expectancy*, and *social support*, correlates moderately with *freedom of life choices* and *perceptions of corruption*, and has little correlation with *generosity*. This implies that happiness is majorly affected by income, support from friends and family, and a healthy life. It is minorly affected by freedom to pursue life choices and perceptions of government and business corruption. Being charitable has little to no effect on happiness. How accurate all of this is, however, is explored further through our machine learning algorithms.
+
+Our best machine learning result was using Random Forests, and this gave us an accuracy of 72%. This means that even with our best efforts, we still only accurately predict less than 3 out of every 4 scores. This could either mean that we simply didn't choose an accurate enough machine learning algorithm for our context, or it could mean that a country's happiness goes beyond the variables that we analyzed. For example, respondents believing that they have a "good life" doesn't necessarily mean that they are happy with it.
+
+## Conclusion
+
+We set out to see just how accurate the 2018 international report on world happiness was on predicting happiness scores, and I believe we achieved satisfactory results. We managed to show visually the frequencies of our happiness scores as well as the independent variables, and we also compared the scores to these variables. We looked at the how correlated *score* is to our other variables. In our machine learning efforts, we created algorithms in an attempt to predict scores, first by just guessing by using the average score, followed by linear regression, k-nearest neighbors, and random forests. Even our best accuracy from these attempts doesn't seem accurate enough, implying we should either use different machine learning techniques in the future, or that we are not able to accurately predict happiness with our given variables. If the latter is true, then much more research needs to be done into how to measure happiness.
+
+#### References
+
+- Wikipedia - World Happiness Report: <https://en.wikipedia.org/wiki/World_Happiness_Report>
+
+- World Happiness Report 2018: <https://worldhappiness.report/ed/2018/>
+
+- Introduction to Data Science, by Rafael A. Irizarry: <https://rafalab.github.io/dsbook/>
